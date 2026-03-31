@@ -17,7 +17,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-# Load .env if present
+# Load .env if present (local development)
 try:
     from dotenv import load_dotenv  # type: ignore[import-untyped]
     load_dotenv(Path(__file__).parent / ".env")
@@ -27,6 +27,27 @@ except ImportError:
 from ga4_attribution.agent import SYSTEM_PROMPT, TOOLS
 from ga4_attribution.bigquery import BigQueryClient
 from ga4_attribution.streamlit_tools import execute_tool
+
+
+def _get_secret(key: str, default: str = "") -> str:
+    """Read from st.secrets first (Streamlit Cloud), then env var (local)."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.environ.get(key, default)
+
+
+@st.cache_resource
+def _build_gcp_credentials():
+    """Build GCP credentials from st.secrets[gcp_service_account] if present."""
+    try:
+        sa = st.secrets.get("gcp_service_account")
+        if sa and sa.get("private_key"):
+            from google.oauth2 import service_account  # type: ignore[import-untyped]
+            return service_account.Credentials.from_service_account_info(dict(sa))
+    except Exception:
+        pass
+    return None  # Fall back to Application Default Credentials
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -89,7 +110,11 @@ def get_bq_client(project_id: str | None = None) -> BigQueryClient:
         st.session_state.bq_client is None
         or st.session_state.bq_project != project_id
     ):
-        st.session_state.bq_client = BigQueryClient(project_id=project_id or None)
+        credentials = _build_gcp_credentials()
+        st.session_state.bq_client = BigQueryClient(
+            project_id=project_id or None,
+            credentials=credentials,
+        )
         st.session_state.bq_project = project_id
     return st.session_state.bq_client
 
@@ -302,10 +327,13 @@ def run_agent_loop(user_message: str) -> None:
     with st.chat_message("user"):
         st.markdown(user_message)
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    api_key = _get_secret("ANTHROPIC_API_KEY")
     if not api_key:
         with st.chat_message("assistant"):
-            st.error("ANTHROPIC_API_KEY is not set. Add it to your .env file.")
+            st.error(
+                "ANTHROPIC_API_KEY is not set. "
+                "Add it to your .env file (local) or Streamlit Cloud Secrets panel."
+            )
         return
 
     client = anthropic.Anthropic(api_key=api_key)

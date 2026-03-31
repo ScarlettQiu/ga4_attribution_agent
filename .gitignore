@@ -3,6 +3,9 @@
 *.json
 !.env.example
 
+# Streamlit secrets (never commit real secrets)
+.streamlit/secrets.toml
+
 # Python
 __pycache__/
 *.py[cod]

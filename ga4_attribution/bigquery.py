@@ -9,7 +9,7 @@ import pandas as pd
 class BigQueryClient:
     """Thin wrapper around google.cloud.bigquery that returns JSON-serializable results."""
 
-    def __init__(self, project_id: str | None = None):
+    def __init__(self, project_id: str | None = None, credentials=None):
         try:
             from google.cloud import bigquery  # noqa: PLC0415
         except ImportError as e:
@@ -19,7 +19,7 @@ class BigQueryClient:
             ) from e
 
         self.project_id = project_id
-        self._client = bigquery.Client(project=project_id)
+        self._client = bigquery.Client(project=project_id, credentials=credentials)
 
     # ------------------------------------------------------------------
     # Core execution
