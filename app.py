@@ -195,7 +195,13 @@ def render_sidebar() -> str | None:
             st.session_state.messages = []
             st.session_state.chat_display = []
             st.session_state.attribution_results = None
+            st.session_state.running = False
             st.rerun()
+
+        if st.session_state.get("running"):
+            if st.button("⚠️ Unlock input", use_container_width=True, type="secondary"):
+                st.session_state.running = False
+                st.rerun()
 
     return injected_msg
 
@@ -505,8 +511,10 @@ def main() -> None:
     # Handle sidebar "Start analysis" button
     if injected_msg and not st.session_state.running:
         st.session_state.running = True
-        run_agent_loop(injected_msg)
-        st.session_state.running = False
+        try:
+            run_agent_loop(injected_msg)
+        finally:
+            st.session_state.running = False
         st.rerun()
 
     # Chat input
@@ -517,8 +525,10 @@ def main() -> None:
 
     if user_input and not st.session_state.running:
         st.session_state.running = True
-        run_agent_loop(user_input)
-        st.session_state.running = False
+        try:
+            run_agent_loop(user_input)
+        finally:
+            st.session_state.running = False
         st.rerun()
 
     # Welcome message on first load
