@@ -1,3 +1,6 @@
+# Session persistence files
+.sessions/
+
 # Environment
 .env
 *.json

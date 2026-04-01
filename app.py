@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -56,9 +57,119 @@ def _build_gcp_credentials():
 st.set_page_config(
     page_title="GA4 Attribution Agent",
     page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
+    layout="centered",
+    initial_sidebar_state="collapsed",
 )
+
+# ---------------------------------------------------------------------------
+# Custom CSS — clean chat-first look
+# ---------------------------------------------------------------------------
+
+CUSTOM_CSS = """
+<style>
+/* ── Hide Streamlit chrome ── */
+#MainMenu          { visibility: hidden; }
+footer             { visibility: hidden; }
+[data-testid="stToolbar"]   { display: none; }
+[data-testid="stDecoration"] { display: none; }
+
+/* ── Page background ── */
+.stApp { background: #ffffff; }
+[data-testid="stSidebar"] { background: #f8fafc; }
+
+/* ── Slim top padding ── */
+.block-container {
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+    max-width: 780px;
+}
+
+/* ── App header ── */
+.app-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #e8edf2;
+    margin-bottom: 1.25rem;
+}
+.app-header-icon { font-size: 1.4rem; }
+.app-header-title {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: #1a1a2e;
+    margin: 0;
+    line-height: 1.2;
+}
+.app-header-sub {
+    font-size: 0.72rem;
+    color: #8a9bb0;
+    margin: 0;
+}
+
+/* ── Chat bubbles ── */
+[data-testid="stChatMessageContent"] {
+    font-size: 0.93rem;
+    line-height: 1.65;
+}
+
+/* User message bubble */
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
+    background: #f0f6ff;
+    border-radius: 14px;
+    padding: 2px 10px;
+}
+
+/* Assistant message — subtle background */
+[data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-assistant"]) {
+    background: #fafbfc;
+    border-radius: 14px;
+    padding: 2px 10px;
+    border: 1px solid #f0f2f5;
+}
+
+/* ── Chat input ── */
+[data-testid="stChatInputContainer"] {
+    border-top: 1px solid #e8edf2;
+    padding-top: 0.5rem;
+}
+
+/* ── Status blocks (tool calls) ── */
+[data-testid="stStatusWidget"] {
+    border-radius: 10px;
+    font-size: 0.85rem;
+}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] .block-container {
+    padding-top: 1.5rem;
+    padding-left: 1rem;
+    padding-right: 1rem;
+    max-width: 100%;
+}
+
+/* ── Session badge ── */
+.session-badge {
+    display: inline-block;
+    font-size: 0.68rem;
+    color: #8a9bb0;
+    background: #f0f4f8;
+    border-radius: 6px;
+    padding: 2px 7px;
+    margin-left: 8px;
+    font-family: monospace;
+    vertical-align: middle;
+}
+
+/* ── Metric cards ── */
+[data-testid="metric-container"] {
+    background: #f8fafc;
+    border-radius: 10px;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #e8edf2;
+}
+</style>
+"""
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -82,14 +193,106 @@ TOOL_LABELS = {
     "show_sql":         "Generating attribution SQL…",
 }
 
+SESSIONS_DIR = Path(__file__).parent / ".sessions"
+
+# ---------------------------------------------------------------------------
+# Session persistence
+# ---------------------------------------------------------------------------
+
+def _get_session_id() -> str:
+    """Get or create a stable session ID stored in the URL query params."""
+    sid = st.query_params.get("sid", "")
+    if not sid:
+        sid = uuid.uuid4().hex[:10]
+        st.query_params["sid"] = sid
+    return sid
+
+
+def _session_path(sid: str) -> Path:
+    SESSIONS_DIR.mkdir(exist_ok=True)
+    return SESSIONS_DIR / f"{sid}.json"
+
+
+def _serialize_content(content: Any) -> Any:
+    """Convert Anthropic SDK content blocks → plain dicts for JSON."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for block in content:
+            if hasattr(block, "model_dump"):
+                out.append(block.model_dump())
+            elif isinstance(block, dict):
+                out.append(block)
+        return out
+    return content
+
+
+def _serialize_artifact(artifact: dict | None) -> dict | None:
+    if artifact is None:
+        return None
+    out = {k: v for k, v in artifact.items() if k != "results_df"}
+    df = artifact.get("results_df")
+    if df is not None:
+        out["results_df_json"] = df.to_json(orient="records")
+    return out
+
+
+def _deserialize_artifact(artifact: dict | None) -> dict | None:
+    if artifact is None:
+        return None
+    import io
+    out = {k: v for k, v in artifact.items() if k != "results_df_json"}
+    raw = artifact.get("results_df_json")
+    if raw:
+        out["results_df"] = pd.read_json(io.StringIO(raw), orient="records")
+    return out
+
+
+def save_session(sid: str) -> None:
+    data = {
+        "messages": [
+            {"role": m["role"], "content": _serialize_content(m["content"])}
+            for m in st.session_state.messages
+        ],
+        "chat_display": [
+            {**e, "artifact": _serialize_artifact(e.get("artifact"))}
+            for e in st.session_state.chat_display
+        ],
+    }
+    try:
+        _session_path(sid).write_text(json.dumps(data, default=str))
+    except Exception:
+        pass  # Never crash if save fails
+
+
+def load_session(sid: str) -> bool:
+    """Load session from disk. Returns True if data was found."""
+    path = _session_path(sid)
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text())
+        st.session_state.messages = data.get("messages", [])
+        st.session_state.chat_display = [
+            {**e, "artifact": _deserialize_artifact(e.get("artifact"))}
+            for e in data.get("chat_display", [])
+        ]
+        return bool(st.session_state.chat_display)
+    except Exception:
+        return False
+
 # ---------------------------------------------------------------------------
 # Session state
 # ---------------------------------------------------------------------------
 
-def _init_state() -> None:
+def _init_state(sid: str) -> None:
+    if "session_loaded" not in st.session_state:
+        st.session_state.session_loaded = load_session(sid)
+
     defaults = {
-        "messages": [],           # Anthropic API message history
-        "chat_display": [],       # Display-only history [{role, text, tools, artifact}]
+        "messages": [],
+        "chat_display": [],
         "attribution_results": None,
         "bq_client": None,
         "bq_project": None,
@@ -98,8 +301,6 @@ def _init_state() -> None:
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
-
-_init_state()
 
 # ---------------------------------------------------------------------------
 # BigQuery client (cached by project_id)
@@ -122,13 +323,11 @@ def get_bq_client(project_id: str | None = None) -> BigQueryClient:
 # Sidebar
 # ---------------------------------------------------------------------------
 
-def render_sidebar() -> str | None:
-    """Render sidebar config. Returns a pre-filled message string if the
-    user clicks 'Start analysis', otherwise None."""
-
+def render_sidebar(sid: str) -> str | None:
+    """Render sidebar. Returns pre-filled message if user clicks Start."""
     with st.sidebar:
-        st.title("⚙️ Quick Setup")
-        st.caption("Fill in your GA4 details to auto-start the conversation.")
+        st.markdown("### ⚙️ Quick Setup")
+        st.caption("Pre-fill your GA4 details to auto-start the analysis.")
 
         project_id = st.text_input(
             "GCP Project ID",
@@ -143,21 +342,18 @@ def render_sidebar() -> str | None:
 
         today = date.today()
         default_start = today.replace(day=1) - timedelta(days=1)
-        default_start = default_start.replace(day=1)  # first day of last month
+        default_start = default_start.replace(day=1)
 
         col1, col2 = st.columns(2)
         with col1:
-            start_date = st.date_input("Start date", value=default_start, key="sb_start")
+            start_date = st.date_input("Start", value=default_start, key="sb_start")
         with col2:
-            end_date = st.date_input("End date", value=today - timedelta(days=1), key="sb_end")
+            end_date = st.date_input("End", value=today - timedelta(days=1), key="sb_end")
 
         conversion_event = st.text_input(
-            "Conversion event",
-            placeholder="purchase",
-            value="purchase",
-            key="sb_event",
+            "Conversion event", placeholder="purchase", value="purchase", key="sb_event"
         )
-        lookback = st.slider("Lookback window (days)", 7, 90, 30, key="sb_lookback")
+        lookback = st.slider("Lookback (days)", 7, 90, 30, key="sb_lookback")
         channel_grouping = st.selectbox(
             "Channel grouping",
             ["default (GA4 groups)", "source / medium"],
@@ -166,7 +362,6 @@ def render_sidebar() -> str | None:
 
         st.divider()
         injected_msg = None
-
         if st.button("▶ Start analysis", type="primary", use_container_width=True):
             if project_id and dataset_id:
                 grouping_val = "default" if "default" in channel_grouping else "source_medium"
@@ -182,26 +377,34 @@ def render_sidebar() -> str | None:
                 st.warning("Enter a project ID and dataset ID first.")
 
         st.divider()
-        st.markdown("**Attribution models**")
+        st.markdown("**Models**")
         for model, color in MODEL_COLORS.items():
             st.markdown(
-                f'<span style="display:inline-block;width:10px;height:10px;'
-                f'border-radius:50%;background:{color};margin-right:6px"></span>'
+                f'<span style="display:inline-block;width:9px;height:9px;'
+                f'border-radius:50%;background:{color};margin-right:6px;vertical-align:middle"></span>'
                 f'`{model}`',
                 unsafe_allow_html=True,
             )
 
+        st.divider()
         if st.button("🗑 Clear conversation", use_container_width=True):
             st.session_state.messages = []
             st.session_state.chat_display = []
             st.session_state.attribution_results = None
             st.session_state.running = False
+            # Remove saved session file
+            try:
+                _session_path(sid).unlink(missing_ok=True)
+            except Exception:
+                pass
             st.rerun()
 
         if st.session_state.get("running"):
             if st.button("⚠️ Unlock input", use_container_width=True, type="secondary"):
                 st.session_state.running = False
                 st.rerun()
+
+        st.caption(f"Session `{sid}`")
 
     return injected_msg
 
@@ -210,42 +413,30 @@ def render_sidebar() -> str | None:
 # ---------------------------------------------------------------------------
 
 def render_attribution_artifact(artifact: dict[str, Any]) -> None:
-    """Render the attribution results table + chart + SQL."""
     df: pd.DataFrame = artifact["results_df"]
     sql: str = artifact["sql"]
     meta: dict = artifact["meta"]
 
-    # Metric cards
     c1, c2, c3 = st.columns(3)
     c1.metric("Conversions", f"{meta['total_conversions']:,}")
     c2.metric("Total value", f"${meta['total_conversion_value']:,.2f}")
     c3.metric("Avg path length", f"{meta['avg_path_length']:.1f} touches")
+    st.markdown(f"_Analysis period: {meta['start_date']} → {meta['end_date']}_")
 
-    st.markdown(
-        f"_Analysis period: {meta['start_date']} → {meta['end_date']}_"
-    )
-
-    # Table
     with st.expander("📋 Attribution table", expanded=True):
         display_df = df.set_index("channel")
-        # Format all numeric columns as 2 decimal places
-        styled = display_df.style.format("{:,.1f}").highlight_max(
-            axis=0, color="#d4f5e9"
-        )
+        styled = display_df.style.format("{:,.1f}").highlight_max(axis=0, color="#d4f5e9")
         st.dataframe(styled, use_container_width=True)
 
-    # Chart — grouped bar
     with st.expander("📊 Chart: models compared", expanded=True):
         fig = _build_chart(df, meta)
         st.plotly_chart(fig, use_container_width=True)
 
-    # SQL
     with st.expander("🔍 Generated SQL", expanded=False):
         st.code(sql, language="sql")
 
 
 def render_journey_preview(rows: list[dict[str, Any]]) -> None:
-    """Render a compact journey preview table."""
     if not rows:
         st.caption("No journey data.")
         return
@@ -261,8 +452,6 @@ def render_journey_preview(rows: list[dict[str, Any]]) -> None:
 def _build_chart(df: pd.DataFrame, meta: dict) -> go.Figure:
     channels = df["channel"].tolist()
     model_cols = [c for c in df.columns if c != "channel"]
-
-    # Horizontal layout when many channels
     horizontal = len(channels) > 7
 
     fig = go.Figure()
@@ -270,30 +459,25 @@ def _build_chart(df: pd.DataFrame, meta: dict) -> go.Figure:
         color = MODEL_COLORS.get(model, "#888888")
         if horizontal:
             fig.add_trace(go.Bar(
-                name=model,
-                y=channels,
-                x=df[model].tolist(),
-                orientation="h",
-                marker_color=color,
+                name=model, y=channels, x=df[model].tolist(),
+                orientation="h", marker_color=color,
             ))
         else:
             fig.add_trace(go.Bar(
-                name=model,
-                x=channels,
-                y=df[model].tolist(),
-                marker_color=color,
+                name=model, x=channels, y=df[model].tolist(), marker_color=color,
             ))
 
     fig.update_layout(
         barmode="group",
-        title=f"Attribution by channel — {meta['start_date']} to {meta['end_date']}",
-        height=420 if not horizontal else max(420, len(channels) * 55),
+        title=f"Attribution — {meta['start_date']} to {meta['end_date']}",
+        height=400 if not horizontal else max(400, len(channels) * 55),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=20, r=20, t=60, b=20),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(gridcolor="#e5e5e5") if not horizontal else dict(),
-        yaxis=dict(gridcolor="#e5e5e5") if not horizontal else dict(),
+        font=dict(family="sans-serif", size=12),
+        xaxis=dict(gridcolor="#eeeeee") if not horizontal else dict(),
+        yaxis=dict(gridcolor="#eeeeee") if not horizontal else dict(),
     )
     return fig
 
@@ -307,7 +491,6 @@ def render_chat_history() -> None:
         with st.chat_message(role):
             if entry.get("text"):
                 st.markdown(entry["text"])
-            # Re-render any stored artifacts
             artifact = entry.get("artifact")
             if artifact:
                 if artifact["type"] == "attribution":
@@ -322,14 +505,12 @@ def render_chat_history() -> None:
 # Agent loop
 # ---------------------------------------------------------------------------
 
-def run_agent_loop(user_message: str) -> None:
+def run_agent_loop(user_message: str, sid: str) -> None:
     """Run the Claude tool-use loop for one user turn, streaming live."""
 
-    # Append user turn
     st.session_state.messages.append({"role": "user", "content": user_message})
     st.session_state.chat_display.append({"role": "user", "text": user_message})
 
-    # Show user bubble immediately
     with st.chat_message("user"):
         st.markdown(user_message)
 
@@ -343,12 +524,9 @@ def run_agent_loop(user_message: str) -> None:
         return
 
     client = anthropic.Anthropic(api_key=api_key)
-
-    # Infer project_id from messages history for BQ client
     project_id = _extract_project_id()
     bq = get_bq_client(project_id)
 
-    # Tool-use loop (same structure as agent.py._call_claude)
     while True:
         with st.chat_message("assistant"):
             text_placeholder = st.empty()
@@ -357,7 +535,6 @@ def run_agent_loop(user_message: str) -> None:
             current_tool: dict | None = None
             assistant_artifact = None
 
-            # ── Streaming ────────────────────────────────────────────
             try:
                 with client.messages.stream(
                     model="claude-opus-4-6",
@@ -395,25 +572,22 @@ def run_agent_loop(user_message: str) -> None:
                 st.error(f"Connection error: {e}")
                 return
             except anthropic.AuthenticationError:
-                st.error("Invalid API key. Check ANTHROPIC_API_KEY in your .env file.")
+                st.error("Invalid API key. Check ANTHROPIC_API_KEY.")
                 return
             except anthropic.APIStatusError as e:
                 st.error(f"API error {e.status_code}: {e.message}")
                 return
 
-            # Finalise text (remove cursor)
             if accumulated_text:
                 text_placeholder.markdown(accumulated_text)
             else:
                 text_placeholder.empty()
 
-            # Append assistant message to API history
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": final_msg.content,
             })
 
-            # ── Execute tool calls ────────────────────────────────────
             tool_results = []
             for tc in tool_calls_raw:
                 name = tc["name"]
@@ -431,13 +605,8 @@ def run_agent_loop(user_message: str) -> None:
                         status.update(label=f"❌ {label}", state="error")
                         st.error(claude_result["error"])
                     else:
-                        status.update(
-                            label=label.replace("…", " ✓"),
-                            state="complete",
-                            expanded=False,
-                        )
+                        status.update(label=label.replace("…", " ✓"), state="complete", expanded=False)
 
-                    # Render artifact inline
                     if ui_artifact:
                         artifact_type = ui_artifact.get("type")
                         if artifact_type == "attribution":
@@ -460,18 +629,18 @@ def run_agent_loop(user_message: str) -> None:
                     else claude_result,
                 })
 
-            # Save this assistant turn to display history
             st.session_state.chat_display.append({
                 "role": "assistant",
                 "text": accumulated_text or None,
                 "artifact": assistant_artifact,
             })
 
-            # If done, break
+            # Save after every assistant turn
+            save_session(sid)
+
             if final_msg.stop_reason == "end_turn" or not tool_results:
                 break
 
-            # Append tool results and loop
             st.session_state.messages.append({
                 "role": "user",
                 "content": tool_results,
@@ -479,12 +648,10 @@ def run_agent_loop(user_message: str) -> None:
 
 
 def _extract_project_id() -> str | None:
-    """Try to find a GCP project ID mentioned in conversation so far."""
+    import re
     for msg in reversed(st.session_state.messages):
         content = msg.get("content", "")
         if isinstance(content, str) and "project" in content.lower():
-            # Very naive: look for something that looks like a project ID
-            import re
             m = re.search(r'project[:\s]+([a-zA-Z0-9_-]+)', content, re.IGNORECASE)
             if m:
                 return m.group(1)
@@ -495,14 +662,14 @@ def _extract_project_id() -> str | None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    st.title("📊 GA4 Attribution Agent")
-    st.caption(
-        "Powered by Claude claude-opus-4-6 · "
-        "Connects to Google BigQuery · "
-        "7 attribution models"
-    )
+    # Inject CSS
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-    # ── Config checks — show visible warnings at the top ──────────────────
+    # Stable session ID from URL
+    sid = _get_session_id()
+    _init_state(sid)
+
+    # ── Config check ──────────────────────────────────────────────────────
     api_key = _get_secret("ANTHROPIC_API_KEY")
     if not api_key:
         st.error(
@@ -511,22 +678,37 @@ def main() -> None:
             icon="🔑",
         )
 
-    # Sidebar — may return a pre-filled message
-    injected_msg = render_sidebar()
+    # ── Header ────────────────────────────────────────────────────────────
+    resumed = st.session_state.get("session_loaded", False)
+    badge = f'<span class="session-badge">{sid}</span>'
+    resumed_tag = ' <span class="session-badge">↩ resumed</span>' if resumed else ""
+    st.markdown(
+        f'<div class="app-header">'
+        f'  <span class="app-header-icon">📊</span>'
+        f'  <div>'
+        f'    <p class="app-header-title">GA4 Attribution Agent{badge}{resumed_tag}</p>'
+        f'    <p class="app-header-sub">Claude claude-opus-4-6 · BigQuery · 7 attribution models</p>'
+        f'  </div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
-    # Render existing conversation
+    # ── Sidebar ───────────────────────────────────────────────────────────
+    injected_msg = render_sidebar(sid)
+
+    # ── Chat history ──────────────────────────────────────────────────────
     render_chat_history()
 
-    # Handle sidebar "Start analysis" button
+    # ── Sidebar trigger ───────────────────────────────────────────────────
     if injected_msg and not st.session_state.running:
         st.session_state.running = True
         try:
-            run_agent_loop(injected_msg)
+            run_agent_loop(injected_msg, sid)
         finally:
             st.session_state.running = False
         st.rerun()
 
-    # Chat input
+    # ── Chat input ────────────────────────────────────────────────────────
     user_input = st.chat_input(
         "Ask me anything about your GA4 data…",
         disabled=st.session_state.running,
@@ -535,22 +717,21 @@ def main() -> None:
     if user_input and not st.session_state.running:
         st.session_state.running = True
         try:
-            run_agent_loop(user_input)
+            run_agent_loop(user_input, sid)
         finally:
             st.session_state.running = False
         st.rerun()
 
-    # Welcome message on first load
+    # ── Welcome message ───────────────────────────────────────────────────
     if not st.session_state.chat_display:
         with st.chat_message("assistant"):
             st.markdown(
                 "👋 Hi! I'm your GA4 attribution analyst.\n\n"
-                "**To get started:**\n"
-                "1. Fill in your BigQuery project and dataset in the sidebar, or\n"
-                "2. Just tell me your project ID and dataset here in chat.\n\n"
-                "I'll explore your data, then run **Last Touch, First Touch, Linear, "
-                "Time Decay, Position-Based, Shapley, and Markov Chain** attribution "
-                "models side by side."
+                "**To get started**, either:\n"
+                "- Open the **sidebar** (top-left ›) and fill in your BigQuery details, or\n"
+                "- Just tell me your **project ID** and **dataset** here in chat.\n\n"
+                "I'll explore your data, then compare **Last Touch, First Touch, Linear, "
+                "Time Decay, Position-Based, Shapley, and Markov Chain** attribution side by side."
             )
 
 
