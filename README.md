@@ -1,13 +1,70 @@
-# GA4 Attribution Agent
+# GA4 Multi-Touch Attribution Skill
 
-A conversational AI agent powered by Claude that connects to Google BigQuery, extracts GA4 customer journey data, and runs **7 attribution models** side-by-side so you can compare how credit is assigned across your marketing channels.
+A complete GA4 marketing attribution toolkit powered by Claude and Google BigQuery. Compares **7 attribution models** side-by-side across four interfaces — from a conversational CLI agent to an interactive Streamlit web app to a Claude Code skill and a LangChain SQL agent.
+
+---
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Interfaces["Entry Points"]
+        A["🖥️  CLI Agent\nmain.py"]
+        B["🌐  Streamlit UI\napp.py"]
+        C["⌨️  Claude Code Skill\n/ga4-attribution"]
+        D["🔗  LangChain SQL Agent\nlangchain_agent.py"]
+    end
+
+    subgraph Core["Core Library  ga4_attribution/"]
+        E["agent.py\nClaude tool-use loop"]
+        F["bigquery.py\nBigQueryClient"]
+        G["sql_builder.py\nbuild_journey_sql()"]
+        H["attribution.py\n7 models"]
+        I["streamlit_tools.py\nexecute_tool()"]
+    end
+
+    subgraph BQ["Google Cloud"]
+        J[("BigQuery\nevents_* tables")]
+    end
+
+    subgraph LLM["Anthropic"]
+        K["Claude\nclaude-opus-4-6"]
+    end
+
+    A --> E
+    B --> I
+    C --> F
+    C --> H
+    D --> F
+    D --> H
+
+    E --> K
+    E --> F
+    B --> K
+    D --> K
+
+    I --> F
+    F --> G
+    F --> J
+    G --> J
+    H --> F
+```
+
+### How the four interfaces work
+
+| Interface | How to run | Best for |
+|---|---|---|
+| **CLI Agent** (`main.py`) | `python main.py` | Guided conversational analysis |
+| **Streamlit UI** (`app.py`) | `streamlit run app.py` | Visual exploration, charts, sharing |
+| **Claude Code Skill** | `/ga4-attribution` in `claude` CLI | Quick runs from your terminal |
+| **LangChain SQL Agent** | `python langchain_agent.py` | Ad-hoc SQL + attribution in one chat |
 
 ---
 
 ## Features
 
-- **Conversational setup** — Claude guides you through connecting to your GA4 BigQuery dataset, choosing conversion events, date ranges, and lookback windows
-- **Standardized SQL** — Generates a clean, reusable journey-extraction query against GA4's `events_*` tables
+- **Conversational setup** — Claude guides you through dataset, conversion events, date ranges, and lookback windows
+- **Standardized SQL** — Generates a clean 4-CTE journey-extraction query against GA4's `events_*` tables
 - **7 attribution models** run in parallel:
 
 | Model | Description |
@@ -16,50 +73,22 @@ A conversational AI agent powered by Claude that connects to Google BigQuery, ex
 | First Touch | 100% credit to the first touchpoint |
 | Linear | Equal credit split across all touchpoints |
 | Time Decay | Exponential decay — more credit to touchpoints closer to conversion |
-| Position-Based | 40% first / 40% last / 20% distributed across middle touches (U-shape) |
+| Position-Based | 40% first / 40% last / 20% middle (U-shape) |
 | Shapley | Game-theory marginal contribution per channel |
 | Markov Chain | Transition matrix removal effects (data-driven) |
 
 - **Default channel grouping** — Maps raw `source / medium` into GA4-style groups (Organic Search, Paid Search, Email, Display, Paid Social, Direct, Referral, Affiliates, Video)
-- **Source/medium mode** — Optionally keep raw `google / cpc` strings instead
-
----
-
-## Architecture
-
-```
-ga4-attribution-agent/
-├── main.py                        # CLI entry point
-├── ga4_attribution/
-│   ├── agent.py                   # Claude-powered conversational agent (tool use loop)
-│   ├── bigquery.py                # BigQuery client wrapper
-│   ├── sql_builder.py             # Standardized GA4 journey extraction SQL
-│   ├── attribution.py             # All 7 attribution model implementations
-│   └── formatters.py              # Table display helpers
-└── requirements.txt
-```
-
-### How the agent works
-
-```
-User ──► Claude (claude-opus-4-6)
-              │
-              ├─► list_events     (BQ: what events exist?)
-              ├─► list_channels   (BQ: what source/medium combos exist?)
-              ├─► preview_journeys (BQ: show example multi-touch paths)
-              ├─► show_sql        (print the generated SQL)
-              └─► run_attribution (BQ extract + all 7 models → results table)
-```
-
-Claude asks the right questions, calls BigQuery tools, and explains the results — you just answer in plain English.
+- **Source/medium mode** — Optionally keep raw `google / cpc` strings
 
 ---
 
 ## Quickstart
 
-### 1. Install dependencies
+### 1. Clone and install
 
 ```bash
+git clone https://github.com/ScarlettQiu/ga4_attribution_skill.git
+cd ga4_attribution_skill
 pip install -r requirements.txt
 ```
 
@@ -67,105 +96,187 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env and add your ANTHROPIC_API_KEY
+# Add your ANTHROPIC_API_KEY
 ```
 
-For BigQuery, either:
-- Set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json` in `.env`, or
-- Use Application Default Credentials: `gcloud auth application-default login`
+For BigQuery:
+```bash
+gcloud auth application-default login
+# OR set GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json in .env
+```
 
-### 3. Run the agent
+### 3. Pick your interface
 
+**CLI Agent** (guided conversation):
 ```bash
 python main.py
 ```
 
-The agent will start a conversation and walk you through the setup.
+**Streamlit UI** (visual, charts):
+```bash
+streamlit run app.py
+```
 
-### Preview the SQL without running anything
+**LangChain SQL Agent** (conversational SQL + attribution):
+```bash
+python langchain_agent.py --project my-project --dataset analytics_123456789
+```
+
+**Claude Code Skill** (from terminal `claude` session):
+```
+/ga4-attribution
+```
+
+### Preview SQL without running anything
 
 ```bash
-python main.py --sql-only
-# Or pre-fill your project:
-python main.py --sql-only --project my-gcp-project --dataset analytics_123456789
+python run_attribution.py \
+  --project my-project \
+  --dataset analytics_123 \
+  --start 20240101 --end 20240131 \
+  --events purchase \
+  --sql-only
 ```
 
 ---
 
-## Example session
+## Streamlit UI
 
-```
-Agent: Hello! What is your Google Cloud project ID and BigQuery dataset ID?
+The web app (`app.py`) adds:
+- **Streaming responses** — see Claude's thinking in real time
+- **Interactive Plotly charts** — grouped bar chart comparing all 7 models per channel
+- **Artifact persistence** — charts and tables stay visible as the conversation continues
+- **Streamlit Cloud secrets** — configure API key and GCP service account via `st.secrets`
 
-You: project is my-company-data, dataset is analytics_987654321
+To deploy on Streamlit Cloud, add these secrets in the dashboard:
 
-Agent: [calls list_events for 20240101–20240131]
-       I can see purchase (4,821 events), add_to_cart (18,304), session_start (142,000)...
-       Which event should count as a conversion?
+```toml
+ANTHROPIC_API_KEY = "sk-ant-..."
 
-You: purchase
-
-Agent: [calls list_channels]
-       Top channels: google/cpc (42k sessions), (direct)/(none) (31k), google/organic (28k)...
-       Lookback window? (default 30 days)
-
-You: 30 days is fine
-
-Agent: [calls run_attribution — extracts 4,821 journeys, 19,847 touchpoints]
-
-╒════════════════╤════════════╤═════════════╤═════════╤════════════╤════════════════╤══════════╤════════╕
-│ channel        │ last_touch │ first_touch │ linear  │ time_decay │ position_based │ shapley  │ markov │
-╞════════════════╪════════════╪═════════════╪═════════╪════════════╪════════════════╪══════════╪════════╡
-│ Paid Search    │  48,210    │  12,053     │  28,140 │   41,380   │    33,747      │  31,204  │ 30,891 │
-│ Organic Search │  19,284    │  33,747     │  26,327 │   20,161   │    26,515      │  25,840  │ 26,102 │
-│ Direct         │  62,673    │   9,642     │  35,621 │   55,441   │    38,568      │  39,042  │ 38,750 │
-│ Email          │   8,037    │  16,074     │  12,055 │    9,644   │    12,864      │  11,892  │ 11,940 │
-│ Paid Social    │   3,218    │   8,037     │   6,428 │    4,023   │     7,236      │   6,612  │  6,497 │
-╘════════════════╧════════════╧═════════════╧═════════╧════════════╧════════════════╧══════════╧════════╛
-
-Agent: Key observations:
-- Direct is over-credited by Last Touch (36% vs 22% in Shapley) — likely many users
-  returning directly after discovering you through paid channels first.
-- Paid Search gets much more credit under Last Touch than First Touch, suggesting it
-  closes journeys that Organic Search started.
-- Shapley and Markov agree closely, which gives confidence in the data-driven numbers.
+[gcp_service_account]
+type = "service_account"
+project_id = "my-project"
+private_key_id = "..."
+private_key = "-----BEGIN RSA PRIVATE KEY-----\n..."
+client_email = "..."
 ```
 
 ---
 
-## GA4 BigQuery schema notes
+## LangChain SQL Agent
 
-The agent works with the standard GA4 BigQuery export schema:
+`langchain_agent.py` wraps BigQuery in LangChain's `SQLDatabaseToolkit` so Claude can write and iterate on GA4 SQL freely alongside our attribution models.
 
-- **Tables:** `events_YYYYMMDD` (daily partitions, filtered with `_TABLE_SUFFIX`)
+**SQL tools available:**
+- `sql_db_list_tables` — list available event tables
+- `sql_db_schema` — get column schema
+- `sql_db_query` — run arbitrary SQL
+- `sql_db_query_checker` — validate SQL before running
+
+**Custom tool:**
+- `run_attribution_models` — runs all 7 models end-to-end
+
+Example questions the LangChain agent can answer:
+```
+"What conversion events are available last month?"
+"Show me the top 10 source/medium combinations by sessions"
+"Run attribution analysis for purchase events in January 2024"
+"How many multi-touch journeys had 3+ touchpoints?"
+```
+
+---
+
+## Claude Code Skill
+
+Install once — use anywhere in your `claude` CLI sessions:
+
+```bash
+# The skill file is already at:
+~/.claude/commands/ga4-attribution.md
+```
+
+Then in any `claude` terminal session:
+```
+/ga4-attribution
+```
+
+Claude will ask for your project, dataset, and date range, run the analysis, and explain the results.
+
+> **Note:** Skills work in the `claude` terminal CLI only, not in IDE extensions.
+
+---
+
+## Testing with Public Data
+
+Google provides an obfuscated GA4 sample dataset in BigQuery:
+
+| Parameter | Value |
+|---|---|
+| Project | your own GCP project ID (for billing) |
+| Dataset | `bigquery-public-data.ga4_obfuscated_sample_ecommerce` |
+| Dates | `20201101` → `20210131` |
+| Event | `purchase` |
+
+No setup required beyond `gcloud auth application-default login`.
+
+---
+
+## GA4 BigQuery Schema Notes
+
+- **Tables:** `events_YYYYMMDD` — always filter with `_TABLE_SUFFIX BETWEEN 'start' AND 'end'`
 - **User key:** `user_pseudo_id`
-- **Channel fields:** `traffic_source.source`, `.medium`, `.name` (on `session_start` events)
-- **Revenue:** `event_params` key `revenue` or `value` (double/float)
+- **Channel fields:** `traffic_source.source`, `.medium`, `.name` on `session_start` events
+- **Event params:** accessed via `UNNEST(event_params)` — never direct array indexing
+- **Revenue:** `event_params` key `revenue` or `value` (double/float, with COALESCE fallback)
 - **Session ID:** `event_params` key `ga_session_id` (int)
 
 ---
 
-## Attribution model details
+## Attribution Model Details
 
 ### Shapley Value
 Computes each channel's **marginal contribution** by iterating over all possible subsets of channels in a journey. Uses a path-proportional characteristic function `v(S) = value × |S| / |path|`. Falls back to Monte Carlo sampling (200 random permutations) when a journey has more than 15 unique channels.
 
 ### Markov Chain
-Builds a **transition probability matrix** between channel states, including absorbing states `Conversion` and `Null`. The **removal effect** for each channel = how much the overall conversion probability drops when that channel is removed from the graph. Removal effects are normalised to total conversion value. Falls back to Linear when all journeys in the sample convert (insufficient contrast to estimate counterfactuals).
+Builds a **transition probability matrix** between channel states, including absorbing states `Conversion` and `Null`. The **removal effect** for each channel = how much the overall conversion probability drops when that channel is removed. Removal effects are normalised to total conversion value. Falls back to Linear when all journeys convert (no contrast for counterfactuals).
 
 ### Time Decay
-Uses exponential decay: `weight = 2^(−Δt / half_life)` where `Δt` is days from touchpoint to conversion. Default half-life is **7 days** (configurable).
+Uses exponential decay: `weight = 2^(−Δt / half_life)` where `Δt` is days from touchpoint to conversion. Default half-life is **7 days**.
 
 ### Position-Based
-Standard U-shape: **40% first / 40% last / 20% middle**. For 2-touchpoint paths the 20% middle is redistributed proportionally between first and last (50/50 split by default). For single-touch paths, 100% credit.
+Standard U-shape: **40% first / 40% last / 20% middle**. For 2-touchpoint paths the middle weight redistributes proportionally (50/50). Single-touch paths get 100%.
+
+---
+
+## Project Structure
+
+```
+ga4_attribution_skill/
+├─��� main.py                    # CLI agent entry point
+├── app.py                     # Streamlit web UI
+├── run_attribution.py         # Standalone CLI (used by the skill)
+├── langchain_agent.py         # LangChain SQL agent
+├── ga4_attribution/
+│   ├── __init__.py
+│   ├── agent.py               # Claude tool-use loop + tools
+│   ├── bigquery.py            # BigQueryClient wrapper
+│   ├── sql_builder.py         # 4-CTE journey extraction SQL
+│   ├── attribution.py         # All 7 attribution models
+│   └── streamlit_tools.py     # execute_tool() for Streamlit artifacts
+├── .streamlit/
+│   ├── config.toml            # Theme settings
+│   └── secrets.toml.example   # Secrets template
+├── requirements.txt
+└── .env.example
+```
 
 ---
 
 ## Requirements
 
 - Python 3.10+
-- An [Anthropic API key](https://console.anthropic.com/)
-- A Google Cloud project with GA4 BigQuery export enabled
+- [Anthropic API key](https://console.anthropic.com/)
+- Google Cloud project with GA4 BigQuery export enabled
 - BigQuery read permissions on the GA4 dataset
 
 ```
@@ -177,4 +288,10 @@ pandas>=2.0.0
 numpy>=1.24.0
 tabulate>=0.9.0
 python-dotenv>=1.0.0
+streamlit>=1.35.0
+plotly>=5.20.0
+langchain>=0.3.0
+langchain-anthropic>=0.3.0
+langchain-community>=0.3.0
+sqlalchemy-bigquery>=1.9.0
 ```
