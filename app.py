@@ -502,6 +502,15 @@ def main() -> None:
         "7 attribution models"
     )
 
+    # ── Config checks — show visible warnings at the top ──────────────────
+    api_key = _get_secret("ANTHROPIC_API_KEY")
+    if not api_key:
+        st.error(
+            "**ANTHROPIC_API_KEY not set.** "
+            "Add it to your `.env` file (local) or the Streamlit Cloud Secrets panel.",
+            icon="🔑",
+        )
+
     # Sidebar — may return a pre-filled message
     injected_msg = render_sidebar()
 
