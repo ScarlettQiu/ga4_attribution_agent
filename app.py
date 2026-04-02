@@ -412,7 +412,10 @@ def render_sidebar(sid: str) -> str | None:
 # Result rendering
 # ---------------------------------------------------------------------------
 
-def render_attribution_artifact(artifact: dict[str, Any]) -> None:
+def render_attribution_artifact(
+    artifact: dict[str, Any],
+    claude_summary: str = "",
+) -> None:
     df: pd.DataFrame = artifact["results_df"]
     sql: str = artifact["sql"]
     meta: dict = artifact["meta"]
@@ -434,6 +437,21 @@ def render_attribution_artifact(artifact: dict[str, Any]) -> None:
 
     with st.expander("🔍 Generated SQL", expanded=False):
         st.code(sql, language="sql")
+
+    # ── Download deck ────────────────────────────────────────────────────
+    try:
+        from ga4_attribution.deck_builder import build_deck
+        deck_buf = build_deck(df, meta, sql, claude_summary)
+        fname = f"ga4_attribution_{meta.get('start_date', 'report')}_{meta.get('end_date', '')}.pptx"
+        st.download_button(
+            label="📥 Download deck (.pptx)",
+            data=deck_buf,
+            file_name=fname,
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            use_container_width=True,
+        )
+    except ImportError:
+        st.caption("Install `python-pptx` to enable deck download.")
 
 
 def render_journey_preview(rows: list[dict[str, Any]]) -> None:
@@ -494,7 +512,7 @@ def render_chat_history() -> None:
             artifact = entry.get("artifact")
             if artifact:
                 if artifact["type"] == "attribution":
-                    render_attribution_artifact(artifact)
+                    render_attribution_artifact(artifact, entry.get("text") or "")
                 elif artifact["type"] == "journey_preview":
                     render_journey_preview(artifact["rows"])
                 elif artifact["type"] == "sql":
