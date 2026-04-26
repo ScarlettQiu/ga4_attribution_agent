@@ -21,6 +21,11 @@ graph TB
         G["sql_builder.py\nbuild_journey_sql()"]
         H["attribution.py\n7 models"]
         I["streamlit_tools.py\nexecute_tool()"]
+        L["config.py\nload_channel_mapping()"]
+    end
+
+    subgraph Config["Company Config"]
+        M["channel_mapping.csv\nUTM remapping rules"]
     end
 
     subgraph BQ["Google Cloud"]
@@ -48,6 +53,8 @@ graph TB
     F --> J
     G --> J
     H --> F
+    L --> G
+    M --> L
 ```
 
 ### How the four interfaces work
@@ -79,6 +86,46 @@ graph TB
 
 - **Default channel grouping** — Maps raw `source / medium` into GA4-style groups (Organic Search, Paid Search, Email, Display, Paid Social, Direct, Referral, Affiliates, Video)
 - **Source/medium mode** — Optionally keep raw `google / cpc` strings
+- **Custom channel remapping** — Supply a CSV to remap UTM codes to business-specific labels (e.g. `google / cpc + pmax` → `PMAX`, `google / cpc + brand` → `Branded Search`). Custom rules take priority; unmatched rows fall back to standard GA4 grouping
+- **Cross-device user stitching** — Optionally use `COALESCE(user_id, user_pseudo_id)` to join logged-in journeys across devices
+
+---
+
+## Company-Specific Configuration
+
+GA4 setups vary across companies. The agent handles three common variations at the start of each session:
+
+### Cross-device user stitching
+
+If your GA4 property tracks logged-in users with `user_id`, the agent will ask whether to enable cross-device stitching. When enabled, the SQL uses `COALESCE(user_id, user_pseudo_id)` so a user who visits on mobile and converts on desktop appears as one journey instead of two.
+
+This can also be enabled via the CLI flag:
+```bash
+python run_attribution.py ... --use-user-id
+```
+
+### Custom channel remapping
+
+If your UTM naming doesn't match standard GA4 channel groups (e.g. you want `google / cpc` split into `PMAX`, `Branded Search`, and `Generic Paid Search`), the agent will ask if you need custom remapping. If yes, it provides this CSV template to fill in:
+
+```csv
+source,medium,campaign_contains,channel_label
+google,cpc,pmax,PMAX
+google,cpc,brand,Branded Search
+google,cpc,,Generic Paid Search
+,,email,Email
+```
+
+**Rules:**
+- Empty cells are wildcards (match anything)
+- `campaign_contains` is a case-insensitive substring match on `utm_campaign`
+- Rows are evaluated top-to-bottom — first match wins
+- Rows that don't match any rule fall back to the standard GA4 channel grouping
+
+Save the file and provide the path when prompted, or pass it directly via the CLI:
+```bash
+python run_attribution.py ... --channel-mapping /path/to/channel_mapping.csv
+```
 
 ---
 
@@ -251,8 +298,8 @@ Standard U-shape: **40% first / 40% last / 20% middle**. For 2-touchpoint paths 
 ## Project Structure
 
 ```
-ga4_attribution_skill/
-├─��� main.py                    # CLI agent entry point
+ga4_attribution_agent/
+├── main.py                    # CLI agent entry point
 ├── app.py                     # Streamlit web UI
 ├── run_attribution.py         # Standalone CLI (used by the skill)
 ├── langchain_agent.py         # LangChain SQL agent
@@ -262,6 +309,7 @@ ga4_attribution_skill/
 │   ├── bigquery.py            # BigQueryClient wrapper
 │   ├── sql_builder.py         # 4-CTE journey extraction SQL
 │   ├── attribution.py         # All 7 attribution models
+│   ├── config.py              # CSV channel mapping parser + template
 │   └── streamlit_tools.py     # execute_tool() for Streamlit artifacts
 ├── .streamlit/
 │   ├── config.toml            # Theme settings
