@@ -33,9 +33,20 @@ def main() -> None:
     parser.add_argument("--grouping", default="default",
                         choices=["default", "source_medium"],
                         help="Channel grouping style")
-    parser.add_argument("--models",   nargs="+", help="Attribution models to run (default: all)")
-    parser.add_argument("--sql-only", action="store_true", help="Print SQL and exit")
+    parser.add_argument("--models",       nargs="+", help="Attribution models to run (default: all)")
+    parser.add_argument("--sql-only",     action="store_true", help="Print SQL and exit")
+    parser.add_argument("--use-user-id",  action="store_true",
+                        help="Use COALESCE(user_id, user_pseudo_id) for cross-device stitching")
+    parser.add_argument("--channel-mapping", metavar="CSV_PATH",
+                        help="Path to custom channel mapping CSV for UTM remapping")
     args = parser.parse_args()
+
+    # ── Resolve custom channel mapping ───────────────────────────────────
+    custom_channel_rules = None
+    if args.channel_mapping:
+        from ga4_attribution.config import load_channel_mapping
+        custom_channel_rules = load_channel_mapping(args.channel_mapping)
+        print(f"📋 Loaded {len(custom_channel_rules)} custom channel mapping rules")
 
     # ── SQL only mode ────────────────────────────────────────────────────
     if args.sql_only:
@@ -48,6 +59,8 @@ def main() -> None:
             conversion_events=args.events,
             lookback_days=args.lookback,
             channel_grouping=args.grouping,
+            use_user_id=args.use_user_id,
+            custom_channel_rules=custom_channel_rules,
         )
         print(sql)
         return
@@ -66,6 +79,10 @@ def main() -> None:
     print(f"   Conversion events : {', '.join(args.events)}")
     print(f"   Lookback window   : {args.lookback} days")
     print(f"   Channel grouping  : {args.grouping}")
+    if args.use_user_id:
+        print(f"   User key          : user_id (cross-device stitching enabled)")
+    if args.channel_mapping:
+        print(f"   Channel mapping   : {args.channel_mapping}")
 
     try:
         journeys_df = bq.extract_journeys(
@@ -76,6 +93,8 @@ def main() -> None:
             conversion_events=args.events,
             lookback_days=args.lookback,
             channel_grouping=args.grouping,
+            use_user_id=args.use_user_id,
+            custom_channel_rules=custom_channel_rules,
         )
     except Exception as e:
         print(f"❌ Query failed: {e}", file=sys.stderr)
@@ -94,6 +113,7 @@ def main() -> None:
     )["conversion_value"].first().sum()
     avg_path = journeys_df["total_touchpoints"].mean()
 
+    print(f"\n   User key              : {'user_id (cross-device)' if args.use_user_id else 'user_pseudo_id'}")
     print(f"\n✅ Found {n_journeys:,} converting journeys")
     print(f"   Total conversion value : ${total_value:,.2f}")
     print(f"   Avg path length        : {avg_path:.1f} touchpoints")

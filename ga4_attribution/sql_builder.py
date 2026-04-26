@@ -67,10 +67,47 @@ CONCAT(
 """.strip()
 
 
-def _channel_expr(channel_grouping: str) -> str:
+def _sq(s: str) -> str:
+    """Escape single quotes for SQL string literals."""
+    return s.replace("'", "''")
+
+
+def _channel_expr(
+    channel_grouping: str,
+    custom_rules: list[dict[str, str]] | None = None,
+) -> str:
+    if custom_rules:
+        return _build_custom_channel_case(custom_rules)
     if channel_grouping == "source_medium":
         return SOURCE_MEDIUM_GROUPING
     return DEFAULT_CHANNEL_GROUPING
+
+
+def _build_custom_channel_case(rules: list[dict[str, str]]) -> str:
+    """Build a CASE expression: custom rules first, then standard GA4 fallback."""
+    # Strip CASE / END wrappers to get just the WHEN...ELSE lines
+    inner = DEFAULT_CHANNEL_GROUPING.strip()
+    inner = inner[len("CASE"):].strip()
+    inner = inner[: -len("END")].strip()
+
+    lines = ["CASE"]
+    for rule in rules:
+        conds: list[str] = []
+        if rule.get("source"):
+            conds.append(f"LOWER(traffic_source.source) = '{_sq(rule['source'].lower())}'")
+        if rule.get("medium"):
+            conds.append(f"LOWER(traffic_source.medium) = '{_sq(rule['medium'].lower())}'")
+        if rule.get("campaign_contains"):
+            kw = _sq(rule["campaign_contains"].lower())
+            conds.append(f"LOWER(COALESCE(traffic_source.name, '')) LIKE '%{kw}%'")
+        if not conds:
+            continue  # no conditions = would shadow everything; skip
+        label = _sq(rule["channel_label"])
+        lines.append(f"    WHEN {' AND '.join(conds)} THEN '{label}'")
+
+    lines.append(f"    {inner}")
+    lines.append("END")
+    return "\n".join(lines)
 
 
 def _quote_events(events: list[str]) -> str:
@@ -85,6 +122,8 @@ def build_journey_sql(
     conversion_events: list[str],
     lookback_days: int = 30,
     channel_grouping: str = "default",
+    use_user_id: bool = False,
+    custom_channel_rules: list[dict[str, str]] | None = None,
 ) -> str:
     """Build the main customer-journey extraction SQL for GA4.
 
@@ -95,8 +134,9 @@ def build_journey_sql(
         touchpoint_position, total_touchpoints, channel,
         source, medium, campaign, session_timestamp
     """
-    channel_expr = _channel_expr(channel_grouping)
+    channel_expr = _channel_expr(channel_grouping, custom_rules=custom_channel_rules)
     events_list = _quote_events(conversion_events)
+    user_key = "COALESCE(user_id, user_pseudo_id)" if use_user_id else "user_pseudo_id"
 
     # Use a slightly wider date window for the session lookup so that
     # sessions starting just before start_date are still captured.
@@ -110,13 +150,14 @@ def build_journey_sql(
 -- Date     : {start_date} → {end_date}
 -- Conversion: {", ".join(conversion_events)}
 -- Lookback : {lookback_days} days
+-- User key : {"user_id (with user_pseudo_id fallback)" if use_user_id else "user_pseudo_id"}
 -- ============================================================
 
 WITH
 -- ── Step 1: Session-level touchpoints ──────────────────────
 session_data AS (
     SELECT
-        user_pseudo_id,
+        {user_key}                                    AS user_pseudo_id,
         (SELECT value.int_value
          FROM UNNEST(event_params)
          WHERE key = 'ga_session_id')               AS session_id,
@@ -134,7 +175,7 @@ session_data AS (
 -- ── Step 2: Conversion events ──────────────────────────────
 conversion_data AS (
     SELECT
-        user_pseudo_id,
+        {user_key}                                    AS user_pseudo_id,
         event_timestamp                               AS conversion_timestamp_us,
         (SELECT value.int_value
          FROM UNNEST(event_params)

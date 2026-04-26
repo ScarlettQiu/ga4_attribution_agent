@@ -96,6 +96,8 @@ class BigQueryClient:
         conversion_events: list[str],
         lookback_days: int = 30,
         limit: int = 5,
+        use_user_id: bool = False,
+        custom_channel_rules: list[dict[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Return a few example multi-touch journeys for inspection."""
         from .sql_builder import build_journey_sql  # noqa: PLC0415
@@ -107,6 +109,8 @@ class BigQueryClient:
             end_date=end_date,
             conversion_events=conversion_events,
             lookback_days=lookback_days,
+            use_user_id=use_user_id,
+            custom_channel_rules=custom_channel_rules,
         )
         full_sql = f"""
         WITH journeys AS ({sql})
@@ -130,6 +134,8 @@ class BigQueryClient:
         conversion_events: list[str],
         lookback_days: int = 30,
         channel_grouping: str = "default",
+        use_user_id: bool = False,
+        custom_channel_rules: list[dict[str, str]] | None = None,
     ) -> pd.DataFrame:
         """Run the full journey extraction SQL and return a DataFrame."""
         from .sql_builder import build_journey_sql  # noqa: PLC0415
@@ -142,5 +148,7 @@ class BigQueryClient:
             conversion_events=conversion_events,
             lookback_days=lookback_days,
             channel_grouping=channel_grouping,
+            use_user_id=use_user_id,
+            custom_channel_rules=custom_channel_rules,
         )
         return self.run_query(sql)

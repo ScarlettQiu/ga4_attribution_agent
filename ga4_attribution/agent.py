@@ -18,6 +18,7 @@ import anthropic
 
 from .bigquery import BigQueryClient
 from .attribution import run_all_models, AVAILABLE_MODELS
+from .config import load_channel_mapping, CHANNEL_MAPPING_TEMPLATE
 from .formatters import (
     print_attribution_table,
     print_journey_preview,
@@ -39,6 +40,24 @@ Your job is to guide the user through a complete attribution analysis on their G
 4. Ask for the **lookback window** in days (default 30) — how far back before a conversion to include touchpoints.
 5. Ask how they want channels grouped: **"default"** (GA4-style channel groups like Organic Search, Paid Search,
    Email, etc.) or **"source_medium"** (raw google / cpc style strings).
+6. Ask: **"Do you have `user_id` populated in your GA4 setup for logged-in users?"**
+   If yes, the analysis will use `COALESCE(user_id, user_pseudo_id)` so cross-device journeys
+   are stitched together correctly. Default: no.
+7. Ask: **"Do you need custom channel remapping, or is the standard GA4 grouping fine?"**
+   If they need custom remapping, show them the CSV template and ask them to fill it in and
+   provide the file path:
+
+```
+source,medium,campaign_contains,channel_label
+google,cpc,pmax,PMAX
+google,cpc,brand,Branded Search
+google,cpc,,Generic Paid Search
+,,email,Email
+```
+
+   Rules: empty cells = wildcard (match anything), `campaign_contains` is case-insensitive substring,
+   rows evaluated top-to-bottom (first match wins), unmatched rows fall back to standard GA4 grouping.
+   Once they give you the file path, call `load_channel_mapping` to preview and confirm the rules.
 
 ### Phase 2 — Data validation
 6. Call `list_channels` to show the top source/medium combos so the user can verify the data looks right.
@@ -103,6 +122,24 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "load_channel_mapping",
+        "description": (
+            "Load and preview a custom channel mapping CSV file. "
+            "Call this after the user provides a file path to confirm the rules look correct "
+            "before running the analysis."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute or ~ path to the channel mapping CSV file",
+                },
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
         "name": "preview_journeys",
         "description": (
             "Fetch a few example multi-touch customer journeys from BigQuery to validate "
@@ -111,20 +148,29 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "project_id":         {"type": "string"},
-                "dataset_id":         {"type": "string"},
-                "start_date":         {"type": "string", "description": "YYYYMMDD"},
-                "end_date":           {"type": "string", "description": "YYYYMMDD"},
-                "conversion_events":  {
+                "project_id":          {"type": "string"},
+                "dataset_id":          {"type": "string"},
+                "start_date":          {"type": "string", "description": "YYYYMMDD"},
+                "end_date":            {"type": "string", "description": "YYYYMMDD"},
+                "conversion_events":   {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "List of GA4 event names that count as conversions",
                 },
-                "lookback_days":      {"type": "integer", "default": 30},
-                "channel_grouping":   {
+                "lookback_days":       {"type": "integer", "default": 30},
+                "channel_grouping":    {
                     "type": "string",
                     "enum": ["default", "source_medium"],
                     "default": "default",
+                },
+                "use_user_id":         {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use COALESCE(user_id, user_pseudo_id) for cross-device stitching",
+                },
+                "channel_mapping_path": {
+                    "type": "string",
+                    "description": "Path to custom channel mapping CSV (optional)",
                 },
             },
             "required": ["project_id", "dataset_id", "start_date", "end_date", "conversion_events"],
@@ -140,19 +186,28 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "project_id":         {"type": "string"},
-                "dataset_id":         {"type": "string"},
-                "start_date":         {"type": "string", "description": "YYYYMMDD"},
-                "end_date":           {"type": "string", "description": "YYYYMMDD"},
-                "conversion_events":  {
+                "project_id":          {"type": "string"},
+                "dataset_id":          {"type": "string"},
+                "start_date":          {"type": "string", "description": "YYYYMMDD"},
+                "end_date":            {"type": "string", "description": "YYYYMMDD"},
+                "conversion_events":   {
                     "type": "array",
                     "items": {"type": "string"},
                 },
-                "lookback_days":      {"type": "integer", "default": 30},
-                "channel_grouping":   {
+                "lookback_days":       {"type": "integer", "default": 30},
+                "channel_grouping":    {
                     "type": "string",
                     "enum": ["default", "source_medium"],
                     "default": "default",
+                },
+                "use_user_id":         {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Use COALESCE(user_id, user_pseudo_id) for cross-device stitching",
+                },
+                "channel_mapping_path": {
+                    "type": "string",
+                    "description": "Path to custom channel mapping CSV (optional)",
                 },
                 "models": {
                     "type": "array",
@@ -169,13 +224,15 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "project_id":         {"type": "string"},
-                "dataset_id":         {"type": "string"},
-                "start_date":         {"type": "string"},
-                "end_date":           {"type": "string"},
-                "conversion_events":  {"type": "array", "items": {"type": "string"}},
-                "lookback_days":      {"type": "integer", "default": 30},
-                "channel_grouping":   {"type": "string", "default": "default"},
+                "project_id":          {"type": "string"},
+                "dataset_id":          {"type": "string"},
+                "start_date":          {"type": "string"},
+                "end_date":            {"type": "string"},
+                "conversion_events":   {"type": "array", "items": {"type": "string"}},
+                "lookback_days":       {"type": "integer", "default": 30},
+                "channel_grouping":    {"type": "string", "default": "default"},
+                "use_user_id":         {"type": "boolean", "default": False},
+                "channel_mapping_path": {"type": "string"},
             },
             "required": ["project_id", "dataset_id", "start_date", "end_date", "conversion_events"],
         },
@@ -290,8 +347,23 @@ class GA4AttributionAgent:
                 print(f"  ✓  Found {len(result)} channel combinations")
                 return result
 
+            elif name == "load_channel_mapping":
+                rules = load_channel_mapping(inputs["file_path"])
+                print(f"  ✓  Loaded {len(rules)} channel mapping rules")
+                return {"rules": rules, "count": len(rules)}
+
             elif name == "preview_journeys":
-                rows = self.bq.preview_journeys(**inputs)
+                custom_rules = self._resolve_channel_rules(inputs)
+                rows = self.bq.preview_journeys(
+                    project_id=inputs["project_id"],
+                    dataset_id=inputs["dataset_id"],
+                    start_date=inputs["start_date"],
+                    end_date=inputs["end_date"],
+                    conversion_events=inputs["conversion_events"],
+                    lookback_days=inputs.get("lookback_days", 30),
+                    use_user_id=inputs.get("use_user_id", False),
+                    custom_channel_rules=custom_rules,
+                )
                 print_journey_preview(rows)
                 return rows
 
@@ -299,6 +371,7 @@ class GA4AttributionAgent:
                 return self._run_attribution_tool(inputs)
 
             elif name == "show_sql":
+                custom_rules = self._resolve_channel_rules(inputs)
                 sql = build_journey_sql(
                     project_id=inputs["project_id"],
                     dataset_id=inputs["dataset_id"],
@@ -307,6 +380,8 @@ class GA4AttributionAgent:
                     conversion_events=inputs["conversion_events"],
                     lookback_days=inputs.get("lookback_days", 30),
                     channel_grouping=inputs.get("channel_grouping", "default"),
+                    use_user_id=inputs.get("use_user_id", False),
+                    custom_channel_rules=custom_rules,
                 )
                 print("\n--- Generated SQL ---")
                 print(sql)
@@ -321,8 +396,16 @@ class GA4AttributionAgent:
             print(f"  ✗  {error_msg}", file=sys.stderr)
             return {"error": error_msg}
 
+    def _resolve_channel_rules(self, inputs: dict[str, Any]) -> list[dict] | None:
+        """Load custom channel rules from a file path if provided."""
+        path = inputs.get("channel_mapping_path")
+        if not path:
+            return None
+        return load_channel_mapping(path)
+
     def _run_attribution_tool(self, inputs: dict[str, Any]) -> dict[str, Any]:
         """Execute the full attribution pipeline and display results."""
+        custom_rules = self._resolve_channel_rules(inputs)
         print("  ⚙  Extracting customer journeys from BigQuery …")
         journeys_df = self.bq.extract_journeys(
             project_id=inputs["project_id"],
@@ -332,6 +415,8 @@ class GA4AttributionAgent:
             conversion_events=inputs["conversion_events"],
             lookback_days=inputs.get("lookback_days", 30),
             channel_grouping=inputs.get("channel_grouping", "default"),
+            use_user_id=inputs.get("use_user_id", False),
+            custom_channel_rules=custom_rules,
         )
 
         n_journeys = journeys_df.groupby(
